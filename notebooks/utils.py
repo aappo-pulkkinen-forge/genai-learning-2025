@@ -11,6 +11,23 @@ from PIL import Image
 from matplotlib import pyplot as plt
 import ipywidgets as widgets
 from IPython.display import display, clear_output
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents.indexes.models import (
+    SearchIndex,
+    SearchField,
+    SimpleField,
+    SearchableField,
+    SearchFieldDataType,
+    VectorSearch,
+    VectorSearchAlgorithmConfiguration,
+    VectorSearchAlgorithmKind,
+    VectorSearchProfile,
+    HnswAlgorithmConfiguration,
+    AzureOpenAIVectorizer,
+    AzureOpenAIVectorizerParameters,
+)
 
 
 def download_image(url, save_path):
@@ -55,7 +72,7 @@ def load_image(image_path):
     return image
 
 
-def generate_embeddings(image_model, image_folder, pickle_file):
+def generate_embeddings(image_model, image_folder, pickle_file, embeddings):
     if os.path.exists(pickle_file):
         with open(pickle_file, "rb") as f:
             embeddings = pickle.load(f)
@@ -67,12 +84,17 @@ def generate_embeddings(image_model, image_folder, pickle_file):
         if img.endswith((".jpg", ".png", ".jpeg"))
     ]
 
-    embeddings = {}
-
     for image_path in tqdm(image_files):
-        image = load_image(image_path)
-        image_embedding = image_model.encode(image, convert_to_tensor=True)  # <- Näin
-        embeddings[image_path] = image_embedding.detach().cpu().numpy()
+        if image_path in embeddings:
+            continue
+        try:
+            image = load_image(image_path)
+            image_embedding = image_model.encode(
+                image, convert_to_tensor=True
+            )  # <- Näin
+            embeddings[image_path] = image_embedding.detach().cpu().numpy()
+        except Exception as e:
+            print(f"Error embedding image {image_path}: {e}")
 
     # Save embeddings to pickle file
     with open(pickle_file, "wb") as f:
@@ -166,3 +188,137 @@ def search_with_text(text_model, text, embeddings, device):
     results = search_similar(text_query_embedding, embeddings)
 
     visualize_images(results, title=f"Text search: {text}")
+
+
+def create_azure_search_index(embeddings, index_name):
+    # Azure Search configuration
+    service_name = os.environ["AZURE_SEARCH_SERVICE_NAME"]
+    admin_key = os.environ["AZURE_SEARCH_ADMIN_KEY"]
+    endpoint = f"https://{service_name}.search.windows.net"
+
+    # Define the index schema as a raw JSON payload
+    index_payload = {
+        "name": index_name,
+        "fields": [
+            {
+                "name": "id",
+                "type": "Edm.String",
+                "key": True,
+                "searchable": False,
+                "filterable": False,
+                "sortable": False,
+                "facetable": False,
+            },
+            {
+                "name": "image_path",
+                "type": "Edm.String",
+                "searchable": False,
+                "filterable": False,
+                "sortable": False,
+                "facetable": False,
+            },
+            {
+                "name": "embedding",
+                "type": "Collection(Edm.Single)",
+                "searchable": True,
+                "filterable": False,
+                "sortable": False,
+                "facetable": False,
+                "retrievable": True,
+                "dimensions": list(embeddings.values())[0].shape[0],
+                "vectorSearchConfiguration": "myHnsw",
+            },
+        ],
+        "vectorSearch": {
+            "algorithmConfigurations": [
+                {
+                    "name": "myHnsw",
+                    "kind": "hnsw",
+                    "hnswParameters": {
+                        "m": 4,
+                        "efConstruction": 400,
+                        "efSearch": 500,
+                        "metric": "cosine",
+                    },
+                }
+            ]
+        },
+    }
+
+    # Make REST API call to create index
+    headers = {"Content-Type": "application/json", "api-key": admin_key}
+
+    create_index_url = f"{endpoint}/indexes/{index_name}?api-version=2023-07-01-Preview"
+
+    response = requests.put(create_index_url, headers=headers, json=index_payload)
+
+    if response.status_code == 201:
+        print(f"Successfully created index {index_name}")
+    else:
+        print(f"Failed to create index. Status code: {response.status_code}")
+        print(f"Error message: {response.text}")
+
+
+def upload_embeddings_to_azure_search(embeddings, index_name):
+    # Upload embeddings to Azure Search
+
+    # Azure Search configuration
+    service_name = os.environ["AZURE_SEARCH_SERVICE_NAME"]
+    admin_key = os.environ["AZURE_SEARCH_ADMIN_KEY"]
+    endpoint = f"https://{service_name}.search.windows.net"
+
+    # Create search client
+    credential = AzureKeyCredential(admin_key)
+    client = SearchClient(
+        endpoint=endpoint, index_name=index_name, credential=credential
+    )
+    # Create search index if it doesn't exist
+    index_client = SearchIndexClient(endpoint=endpoint, credential=credential)
+
+    if index_name not in [index.name for index in index_client.list_indexes()]:
+        raise ValueError(f"Index {index_name} does not exist")
+
+    # Prepare documents for upload
+    docs = []
+    for image_path, embedding in embeddings.items():
+        doc = {
+            "id": image_path.split("/")[-1].split(".")[0],
+            "image_path": image_path,
+            "embedding": embedding.tolist(),  # Convert numpy array to list
+        }
+        docs.append(doc)
+
+    # Upload in batches of 1000 documents
+    batch_size = 1000
+    for i in range(0, len(docs), batch_size):
+        batch = docs[i : i + batch_size]
+        try:
+            results = client.upload_documents(documents=batch)
+            print(f"Uploaded batch {i//batch_size + 1}")
+        except Exception as e:
+            print(f"Failed to upload batch {i//batch_size + 1}: {e}")
+
+
+def get_embeddings_from_azure_search(index_name):
+    # Azure Search configuration
+    service_name = os.environ["AZURE_SEARCH_SERVICE_NAME"]
+    admin_key = os.environ["AZURE_SEARCH_ADMIN_KEY"]
+    endpoint = f"https://{service_name}.search.windows.net"
+
+    # Initialize the search client
+    credential = AzureKeyCredential(admin_key)
+    client = SearchClient(
+        endpoint=endpoint, index_name=index_name, credential=credential
+    )
+
+    # Get all documents from the index
+    results = list(client.search("*", select=["id", "image_path", "embedding"]))
+
+    # Create embeddings dictionary
+    embeddings = {}
+    for doc in results:
+        image_path = doc["image_path"]
+        embedding = np.array(doc["embedding"])  # Convert list back to numpy array
+        embeddings[image_path] = embedding
+
+    return embeddings
