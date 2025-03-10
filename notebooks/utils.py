@@ -192,8 +192,7 @@ def search_with_text(text_model, text, embeddings, device):
 
 def create_azure_search_index(embeddings, index_name):
     # Azure Search configuration
-    service_name = os.environ["AZURE_SEARCH_SERVICE_NAME"]
-    admin_key = os.environ["AZURE_SEARCH_ADMIN_KEY"]
+    service_name, admin_key = get_search_credentials()
     endpoint = f"https://{service_name}.search.windows.net"
 
     # Define the index schema as a raw JSON payload
@@ -263,8 +262,7 @@ def upload_embeddings_to_azure_search(embeddings, index_name):
     # Upload embeddings to Azure Search
 
     # Azure Search configuration
-    service_name = os.environ["AZURE_SEARCH_SERVICE_NAME"]
-    admin_key = os.environ["AZURE_SEARCH_ADMIN_KEY"]
+    service_name, admin_key = get_search_credentials()
     endpoint = f"https://{service_name}.search.windows.net"
 
     # Create search client
@@ -299,10 +297,23 @@ def upload_embeddings_to_azure_search(embeddings, index_name):
             print(f"Failed to upload batch {i//batch_size + 1}: {e}")
 
 
+def get_search_credentials():
+    service_name = os.environ.get("AZURE_SEARCH_SERVICE_NAME", None)
+    if service_name is None:
+        from google.colab import userdata
+
+        service_name = userdata.get("AZURE_SEARCH_SERVICE_NAME")
+    admin_key = os.environ.get("AZURE_SEARCH_ADMIN_KEY", None)
+    if admin_key is None:
+        from google.colab import userdata
+
+        admin_key = userdata.get("AZURE_SEARCH_ADMIN_KEY")
+    return service_name, admin_key
+
+
 def get_embeddings_from_azure_search(index_name):
     # Azure Search configuration
-    service_name = os.environ["AZURE_SEARCH_SERVICE_NAME"]
-    admin_key = os.environ["AZURE_SEARCH_ADMIN_KEY"]
+    service_name, admin_key = get_search_credentials()
     endpoint = f"https://{service_name}.search.windows.net"
 
     # Initialize the search client
