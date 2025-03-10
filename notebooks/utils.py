@@ -72,17 +72,21 @@ def load_image(image_path):
     return image
 
 
+def get_all_image_paths(image_folder):
+    return [
+        os.path.join(image_folder, img)
+        for img in os.listdir(image_folder)
+        if img.endswith((".jpg", ".png", ".jpeg"))
+    ]
+
+
 def generate_embeddings(image_model, image_folder, pickle_file, embeddings):
     if os.path.exists(pickle_file):
         with open(pickle_file, "rb") as f:
             embeddings = pickle.load(f)
         print("Loaded embeddings from pickle file.")
         return embeddings
-    image_files = [
-        os.path.join(image_folder, img)
-        for img in os.listdir(image_folder)
-        if img.endswith((".jpg", ".png", ".jpeg"))
-    ]
+    image_files = get_all_image_paths(image_folder)
 
     for image_path in tqdm(image_files):
         if image_path in embeddings:
